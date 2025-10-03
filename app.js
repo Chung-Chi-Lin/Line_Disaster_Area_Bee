@@ -221,13 +221,15 @@ function formatDriverReservationMsg(day) {
 // ==================================================== SQL函式處 ====================================================
 // SQL 專用 function
 async function executeSQL(query, params) {
-	try {
+	const MAX_RETRIES = 3;
+	const RETRY_DELAY_MS = 2000; // 重試間隔 2 秒
+
+	// 建立 request 的小函式
+	const doQuery = async (q, p) => {
 		const request = pool.request();
-
-		for (const param in params) {
-			const value = params[param];
+		for (const param in p) {
+			const value = p[param];
 			let detectedType;
-
 			if (typeof value === 'string') {
 				detectedType = sql.NVarChar;
 			} else if (typeof value === 'number') {
@@ -235,19 +237,33 @@ async function executeSQL(query, params) {
 			} else if (value instanceof Date) {
 				detectedType = sql.DateTime;
 			} else {
-				detectedType = sql.VarBinary; // 假設其他非指定類型都是VarBinary
+				detectedType = sql.VarBinary;
 			}
-
 			request.input(param, detectedType, value);
 		}
+		const result = await request.query(q);
+		return result;
+	};
 
-		const result = await request.query(query);
-		return [result.recordset, result.columns];
-
-	} catch (error) {
-		createResponse('text', '資料異常請聯絡開發人員');
-		console.error('SQL Error:', error);
-		throw error;
+	// 嘗試做一次喚醒／測試查詢
+	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+		try {
+			// 用非常輕量查詢作為喚醒／連線檢查
+			await doQuery('SELECT 1 AS dummy', {});
+			// 如果上述成功，代表 DB 已經 ready，可以安全執行正式 query
+			const actual = await doQuery(query, params);
+			return [actual.recordset, actual.columns];
+		} catch (err) {
+			console.error(`executeSQL attempt ${attempt} failed:`, err);
+			if (attempt < MAX_RETRIES - 1) {
+				// 等待一段時間再重試
+				await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+				continue;
+			} else {
+				// 最後一次也失敗，就拋出錯誤
+				throw err;
+			}
+		}
 	}
 }
 
