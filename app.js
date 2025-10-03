@@ -222,45 +222,46 @@ function formatDriverReservationMsg(day) {
 // SQL 專用 function
 async function executeSQL(query, params) {
 	const MAX_RETRIES = 3;
-	const RETRY_DELAY_MS = 2000; // 重試間隔 2 秒
+	const RETRY_DELAY_MS = 2000; // 重試間隔（毫秒）
 
-	// 建立 request 的小函式
+	// 封裝一個真的送查詢的函式
 	const doQuery = async (q, p) => {
-		const request = pool.request();
-		for (const param in p) {
-			const value = p[param];
-			let detectedType;
-			if (typeof value === 'string') {
-				detectedType = sql.NVarChar;
-			} else if (typeof value === 'number') {
-				detectedType = sql.Int;
-			} else if (value instanceof Date) {
-				detectedType = sql.DateTime;
+		const req = pool.request();
+		for (const key in p) {
+			const val = p[key];
+			let dt;
+			if (typeof val === 'string') {
+				dt = sql.NVarChar;
+			} else if (typeof val === 'number') {
+				dt = sql.Int;
+			} else if (val instanceof Date) {
+				dt = sql.DateTime;
 			} else {
-				detectedType = sql.VarBinary;
+				dt = sql.VarBinary;
 			}
-			request.input(param, detectedType, value);
+			req.input(key, dt, val);
 		}
-		const result = await request.query(q);
+		const result = await req.query(q);
 		return result;
 	};
 
-	// 嘗試做一次喚醒／測試查詢
+	// 延遲函式
+	const delay = ms => new Promise(res => setTimeout(res, ms));
+
 	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
 		try {
-			// 用非常輕量查詢作為喚醒／連線檢查
+			// 喚醒 / 檢查：先下個很輕量查詢（SELECT 1）確保資料庫已恢復
 			await doQuery('SELECT 1 AS dummy', {});
-			// 如果上述成功，代表 DB 已經 ready，可以安全執行正式 query
-			const actual = await doQuery(query, params);
-			return [actual.recordset, actual.columns];
+			// 如果這邊成功了，就執行真正的查詢
+			const res = await doQuery(query, params);
+			return [res.recordset, res.columns];
 		} catch (err) {
-			console.error(`executeSQL attempt ${attempt} failed:`, err);
+			console.error(`executeSQL attempt ${attempt} failed:`, err.message || err);
 			if (attempt < MAX_RETRIES - 1) {
-				// 等待一段時間再重試
-				await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
-				continue;
+				// 若還沒到最大次數，等一下重試
+				await delay(RETRY_DELAY_MS);
 			} else {
-				// 最後一次也失敗，就拋出錯誤
+				// 最後一次也失敗，拋錯讓上層處理
 				throw err;
 			}
 		}
